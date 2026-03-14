@@ -24,19 +24,27 @@ const CATS = [{ id: "food", l: "อาหาร", e: "🍜" }, { id: "transport"
 const TIMEOUT = 5 * 60 * 1000, PINLEN = 4, MAX_PIN = 5, LOCK_MS = 5 * 60 * 1000, MAX_TX = 500, MAX_IMG = 3, SYNC_MS = 5000;
 const INIT_DATA = { names: ["ฉัน", "แฟน"], transactions: [], nextId: 1, creditDueDay: 25 };
 
-const sGet = async k => { try { return localStorage.getItem("cet_" + k) ?? null; } catch { return null; } };
-const sSet = async (k, v) => { try { localStorage.setItem("cet_" + k, v); } catch {} };
+const sGet = async k => { try { const v = localStorage.getItem('cet_' + k); return v ?? null; } catch { return null; } };
+const sSet = async (k, v) => { try { localStorage.setItem('cet_' + k, v); } catch {} };
 
 const Hearts = () => {
   const h = useMemo(() => Array.from({ length: 6 }, (_, i) => ({ i, l: Math.random() * 100, dl: Math.random() * 6, sz: 10 + Math.random() * 14, dr: 8 + Math.random() * 6, op: .06 + Math.random() * .1 })), []);
   return <div style={{ position: "fixed", inset: 0, pointerEvents: "none", zIndex: 0, overflow: "hidden" }}>{h.map(x => <div key={x.i} style={{ position: "absolute", left: `${x.l}%`, bottom: -30, fontSize: x.sz, opacity: x.op, animation: `floatUp ${x.dr}s ${x.dl}s ease-in infinite` }}>💕</div>)}</div>;
 };
 
-// ═══ PIN SCREEN ═══
-function PinScreen({ mode, onOk, onSetup, lock }) {
+// ═══ PIN SCREEN (with built-in PIN recovery) ═══
+function PinScreen({ mode, onOk, onSetup, lock, onRecovered, onReset }) {
   const [p, setP] = useState(""); const [c, setC] = useState(""); const [step, setStep] = useState(mode === "setup" ? "create" : "enter");
   const [err, setErr] = useState(""); const [shake, setShake] = useState(false);
-  const F = `'Sarabun','Noto Sans Thai',sans-serif`, pk = "#e8628c", pkd = "#c2185b";
+  // Recovery
+  const [showRecovery, setShowRecovery] = useState(false);
+  const [recovering, setRecovering] = useState(false);
+  const [recPct, setRecPct] = useState(0);
+  const [recResult, setRecResult] = useState(null); // { pin, data } | "fail"
+  const [showConfirmReset, setShowConfirmReset] = useState(false);
+  const cancelRef = useRef(false);
+
+  const F = `'Sarabun','Noto Sans Thai',sans-serif`, pk = "#e8628c", pkd = "#c2185b", pkl = "#fce4ec", pks = "#f8bbd0";
   const go = n => { if (lock > 0) return; const cur = step === "confirm" ? c : p; if (cur.length >= PINLEN) return; const nx = cur + n;
     if (step === "confirm") { setC(nx); if (nx.length === PINLEN) { if (nx === p) onSetup(nx); else { setErr("PIN ไม่ตรงกัน"); setC(""); setShake(true); setTimeout(() => setShake(false), 500); } } }
     else if (step === "create") { setP(nx); if (nx.length === PINLEN) { setStep("confirm"); setErr(""); } }
@@ -44,9 +52,135 @@ function PinScreen({ mode, onOk, onSetup, lock }) {
   };
   const del = () => step === "confirm" ? setC(x => x.slice(0, -1)) : setP(x => x.slice(0, -1));
   useEffect(() => { if (mode === "enter") { setP(""); setStep("enter"); } }, [mode]);
+
+  const startRecovery = async () => {
+    setRecovering(true); setRecPct(0); setRecResult(null); cancelRef.current = false;
+    try {
+      const salt = await sGet("pin_salt"); const storedHash = await sGet("pin_hash"); const encStr = await sGet("app_data");
+      if (!salt || !storedHash || !encStr) { setRecResult("fail"); setRecovering(false); return; }
+      const encData = JSON.parse(encStr);
+      for (let i = 0; i <= 9999; i++) {
+        if (cancelRef.current) { setRecovering(false); return; }
+        const pin = String(i).padStart(4, "0");
+        try {
+          const ph = await Crypto.hash(pin, salt);
+          if (ph === storedHash) {
+            const key = await Crypto.deriveKey(pin, salt);
+            const dec = await Crypto.decrypt(encData, key);
+            if (dec) { setRecResult({ pin, data: dec }); setRecovering(false); return; }
+          }
+        } catch {}
+        if (i % 50 === 0) { setRecPct(Math.round((i / 10000) * 100)); await new Promise(r => setTimeout(r, 0)); }
+      }
+      setRecResult("fail"); setRecovering(false);
+    } catch { setRecResult("fail"); setRecovering(false); }
+  };
+
   const cur = step === "confirm" ? c : p;
   const title = step === "create" ? "🔒 ตั้ง PIN ใหม่" : step === "confirm" ? "🔒 ยืนยัน PIN" : "🔒 ใส่ PIN เพื่อเข้าใช้";
   const sub = step === "create" ? "ตั้งรหัส 4 หลักเพื่อปกป้องข้อมูล" : step === "confirm" ? "กรอก PIN อีกครั้ง" : lock > 0 ? `ถูกล็อก — รอ ${lock} วินาที` : "กรอกรหัส 4 หลัก";
+
+  const bst = p => ({ width: "100%", padding: "14px", borderRadius: 14, border: p ? "none" : `2px solid ${pks}`, background: p ? `linear-gradient(135deg,${pk},${pkd})` : "white", color: p ? "white" : pk, fontWeight: 700, fontSize: 15, cursor: "pointer", fontFamily: F, marginBottom: 10, boxShadow: p ? "0 4px 16px rgba(232,98,140,.25)" : "none" });
+
+  // ── Recovery Found Screen ──
+  if (recResult && recResult !== "fail") {
+    const d = recResult.data, names = d.names || ["ฉัน", "แฟน"];
+    const txs = d.transactions || [];
+    const pending = txs.filter(t => !t.settled);
+    let cashBal = 0, creditBal = 0;
+    pending.forEach(t => { const a = t.split ? t.amount / 2 : t.amount; const isCash = (t.payMethod || "cash") === "cash"; t.payer === 0 ? (isCash ? cashBal += a : creditBal += a) : (isCash ? cashBal -= a : creditBal -= a); });
+    const fmt = n => Math.abs(n).toLocaleString("th-TH", { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+    const catE = { food: "🍜", transport: "🚗", shopping: "🛍️", entertainment: "🎬", bills: "📄", other: "💫" };
+    return (
+      <div style={{ minHeight: "100vh", background: "linear-gradient(160deg,#fff0f3,#ffe0ec,#fce4ec)", fontFamily: F, padding: 20 }}>
+        <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;600;700;800&display=swap" rel="stylesheet" />
+        <div style={{ maxWidth: 400, margin: "0 auto" }}>
+          <div style={{ background: "rgba(255,255,255,.92)", borderRadius: 24, padding: "28px 24px", textAlign: "center", boxShadow: "0 8px 40px rgba(232,98,140,.15)", marginBottom: 16 }}>
+            <div style={{ fontSize: 48, marginBottom: 8 }}>🎉</div>
+            <h2 style={{ color: pkd, fontWeight: 800, fontSize: 20, margin: "0 0 6px" }}>กู้ข้อมูลสำเร็จ!</h2>
+            <p style={{ color: "#b0728a", fontSize: 13, margin: "0 0 16px" }}>จดรหัส PIN แล้วกดเข้าใช้งานได้เลย</p>
+            <div style={{ background: pkl, borderRadius: 14, padding: "12px 20px", marginBottom: 16 }}>
+              <div style={{ fontSize: 11, color: "#b0728a" }}>PIN ของคุณคือ</div>
+              <div style={{ fontSize: 36, fontWeight: 800, color: pkd, letterSpacing: 8 }}>{recResult.pin}</div>
+            </div>
+            <button onClick={() => onRecovered(recResult.pin, recResult.data)} style={bst(true)}>🔓 เข้าใช้งานเลย</button>
+          </div>
+
+          {/* Summary */}
+          <div style={{ background: "rgba(255,255,255,.92)", borderRadius: 20, padding: "20px", boxShadow: "0 4px 24px rgba(232,98,140,.1)", marginBottom: 16 }}>
+            <h3 style={{ color: pkd, fontSize: 15, fontWeight: 800, margin: "0 0 12px" }}>📊 สรุปยอดค้าง</h3>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+              <div style={{ textAlign: "center", padding: 12, background: pkl, borderRadius: 12 }}>
+                <div style={{ fontSize: 11, color: "#b0728a" }}>💵 เงินสด</div>
+                <div style={{ fontSize: 20, fontWeight: 800, color: pkd }}>฿{fmt(cashBal)}</div>
+              </div>
+              <div style={{ textAlign: "center", padding: 12, background: "#e3f2fd", borderRadius: 12 }}>
+                <div style={{ fontSize: 11, color: "#5c6bc0" }}>💳 บัตรเครดิต</div>
+                <div style={{ fontSize: 20, fontWeight: 800, color: "#1565c0" }}>฿{fmt(creditBal)}</div>
+              </div>
+            </div>
+            <p style={{ textAlign: "center", fontSize: 12, color: "#b0728a", marginTop: 10 }}>
+              {pending.length} รายการค้าง • {txs.filter(t => t.settled).length} เคลียร์แล้ว
+            </p>
+          </div>
+
+          {/* Pending transactions */}
+          {pending.length > 0 && <div style={{ background: "rgba(255,255,255,.92)", borderRadius: 20, padding: "20px", boxShadow: "0 4px 24px rgba(232,98,140,.1)" }}>
+            <h3 style={{ color: pkd, fontSize: 15, fontWeight: 800, margin: "0 0 12px" }}>📋 รายการค้างจ่าย ({pending.length})</h3>
+            {pending.map((t, i) => { const isCc = t.payMethod === "credit"; return (
+              <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 0", borderBottom: i < pending.length - 1 ? "1px solid rgba(232,98,140,.08)" : "none" }}>
+                <div style={{ fontSize: 18 }}>{catE[t.category] || "💫"}</div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontWeight: 600, fontSize: 12, color: "#4a2036" }}>{t.note} <span style={{ fontSize: 9, padding: "1px 5px", borderRadius: 4, background: isCc ? "#e3f2fd" : "#fff8e1", color: isCc ? "#1565c0" : "#f57f17" }}>{isCc ? "💳" : "💵"}</span></div>
+                  <div style={{ fontSize: 10, color: "#b0728a" }}>{names[t.payer]} • {new Date(t.date).toLocaleDateString("th-TH", { day: "numeric", month: "short" })}</div>
+                </div>
+                <div style={{ fontWeight: 800, fontSize: 14, color: isCc ? "#1565c0" : pkd }}>฿{fmt(t.split ? t.amount / 2 : t.amount)}</div>
+              </div>
+            ); })}
+          </div>}
+        </div>
+      </div>
+    );
+  }
+
+  // ── Recovery Screen ──
+  if (showRecovery) return (
+    <div style={{ minHeight: "100vh", background: "linear-gradient(160deg,#fff0f3,#ffe0ec,#fce4ec)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", fontFamily: F, padding: 20 }}>
+      <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;600;700;800&display=swap" rel="stylesheet" /><Hearts />
+      <div style={{ textAlign: "center", zIndex: 1, background: "rgba(255,255,255,.92)", borderRadius: 24, padding: "32px 28px", maxWidth: 340, width: "100%", boxShadow: "0 12px 48px rgba(232,98,140,.2)" }}>
+        {recovering ? (<>
+          <div style={{ fontSize: 40, marginBottom: 10 }}>🔍</div>
+          <h2 style={{ color: pkd, fontWeight: 800, fontSize: 18, margin: "0 0 8px" }}>กำลังค้นหา PIN...</h2>
+          <p style={{ color: "#b0728a", fontSize: 12, margin: "0 0 16px" }}>กรุณารอสักครู่ ไม่เกิน 1 นาที</p>
+          <div style={{ height: 10, background: pkl, borderRadius: 5, overflow: "hidden", marginBottom: 8 }}>
+            <div style={{ height: "100%", width: `${recPct}%`, background: `linear-gradient(90deg,${pk},${pkd})`, borderRadius: 5, transition: "width .3s" }} />
+          </div>
+          <p style={{ color: "#cca0b3", fontSize: 12 }}>{recPct}% — กำลังลอง PIN ทั้งหมด 10,000 แบบ</p>
+          <button onClick={() => { cancelRef.current = true; setShowRecovery(false); setRecovering(false); }} style={{ ...bst(false), marginTop: 16 }}>ยกเลิก</button>
+        </>) : recResult === "fail" ? (<>
+          <div style={{ fontSize: 40, marginBottom: 10 }}>😢</div>
+          <h2 style={{ color: pkd, fontWeight: 800, fontSize: 18, margin: "0 0 8px" }}>ไม่สามารถกู้ข้อมูลได้</h2>
+          <p style={{ color: "#b0728a", fontSize: 12, margin: "0 0 16px" }}>ข้อมูลอาจเสียหายหรือถูกลบ</p>
+          {!showConfirmReset ? (
+            <button onClick={() => setShowConfirmReset(true)} style={bst(false)}>🗑️ รีเซ็ตแล้วเริ่มใหม่</button>
+          ) : (<>
+            <div style={{ background: "#fff3e0", borderRadius: 12, padding: "12px 16px", fontSize: 13, color: "#e65100", marginBottom: 12 }}>⚠️ ข้อมูลทั้งหมดจะหายไป แน่ใจหรือไม่?</div>
+            <button onClick={() => { onReset(); }} style={{ ...bst(true), background: "linear-gradient(135deg,#e53935,#c62828)" }}>ยืนยันรีเซ็ต</button>
+          </>)}
+          <button onClick={() => { setShowRecovery(false); setRecResult(null); }} style={{ ...bst(false), marginTop: 4 }}>← กลับ</button>
+        </>) : (<>
+          <div style={{ fontSize: 40, marginBottom: 10 }}>🔓</div>
+          <h2 style={{ color: pkd, fontWeight: 800, fontSize: 18, margin: "0 0 8px" }}>ลืม PIN?</h2>
+          <p style={{ color: "#b0728a", fontSize: 12, margin: "0 0 20px" }}>ระบบจะค้นหา PIN ของคุณอัตโนมัติ<br />แล้วถอดรหัสข้อมูลเดิมกลับมาให้<br />ข้อมูลจะไม่หายไปไหน</p>
+          <button onClick={startRecovery} style={bst(true)}>🔍 ค้นหา PIN และกู้ข้อมูล</button>
+          <button onClick={() => setShowRecovery(false)} style={bst(false)}>← กลับ</button>
+        </>)}
+      </div>
+      <style>{`@keyframes floatUp{0%{transform:translateY(0) rotate(0);opacity:0}10%{opacity:1}90%{opacity:1}100%{transform:translateY(-110vh) rotate(25deg);opacity:0}}`}</style>
+    </div>
+  );
+
+  // ── Normal PIN Screen ──
   return (
     <div style={{ minHeight: "100vh", background: "linear-gradient(160deg,#fff0f3,#ffe0ec,#fce4ec)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", fontFamily: F, padding: 20 }}>
       <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;600;700;800&display=swap" rel="stylesheet" /><Hearts />
@@ -61,7 +195,8 @@ function PinScreen({ mode, onOk, onSetup, lock }) {
         <div style={{ display: "grid", gridTemplateColumns: "repeat(3,72px)", gap: 12, justifyContent: "center", marginTop: 20 }}>
           {[1, 2, 3, 4, 5, 6, 7, 8, 9, null, 0, "⌫"].map((n, i) => <button key={i} onClick={() => n === "⌫" ? del() : n !== null && go(String(n))} disabled={lock > 0 && n !== "⌫" && n !== null} style={{ width: 72, height: 72, borderRadius: "50%", border: n === null ? "none" : `2px solid ${lock > 0 ? "#ddd" : pk}`, background: n === null ? "transparent" : "rgba(255,255,255,.8)", color: lock > 0 ? "#ccc" : pkd, fontSize: n === "⌫" ? 22 : 26, fontWeight: 700, cursor: n === null ? "default" : "pointer", fontFamily: F, visibility: n === null ? "hidden" : "visible" }}>{n}</button>)}
         </div>
-        <div style={{ marginTop: 32, padding: "10px 20px", background: "rgba(255,255,255,.7)", borderRadius: 12, fontSize: 11, color: "#b0728a", lineHeight: 1.5 }}>🛡️ AES-256-GCM • PBKDF2 310K • HMAC-SHA256<br />🔄 Real-time Shared Sync • OWASP 2025</div>
+        {mode === "enter" && <button onClick={() => setShowRecovery(true)} style={{ background: "none", border: "none", color: "#d4869e", fontSize: 13, cursor: "pointer", fontFamily: F, marginTop: 20, textDecoration: "underline" }}>ลืม PIN? กดที่นี่</button>}
+        <div style={{ marginTop: 20, padding: "10px 20px", background: "rgba(255,255,255,.7)", borderRadius: 12, fontSize: 11, color: "#b0728a", lineHeight: 1.5 }}>🛡️ AES-256-GCM • PBKDF2 310K • HMAC-SHA256<br />🔄 Real-time Shared Sync • OWASP 2025</div>
       </div>
       <style>{`@keyframes shakeX{0%,100%{transform:translateX(0)}20%{transform:translateX(-10px)}40%{transform:translateX(10px)}60%{transform:translateX(-6px)}80%{transform:translateX(6px)}}@keyframes floatUp{0%{transform:translateY(0) rotate(0);opacity:0}10%{opacity:1}90%{opacity:1}100%{transform:translateY(-110vh) rotate(25deg);opacity:0}}`}</style>
     </div>
@@ -245,7 +380,27 @@ export default function App() {
   const tbt = a => ({ flex: 1, padding: "10px 0", border: "none", background: a ? pk : "transparent", color: a ? "white" : "#b0728a", fontWeight: 700, fontSize: 12, cursor: "pointer", borderRadius: 12, fontFamily: F });
   const syncDot = syncSt === "synced" ? "#4caf50" : syncSt === "syncing" ? "#ff9800" : syncSt === "error" ? "#e53935" : "#ccc";
 
-  if (!isAuth) return <PinScreen mode={hasPin ? "enter" : "setup"} onOk={handleVerify} onSetup={handleSetup} lock={lockSec} />;
+  // ── Recovery: login with brute-forced PIN ──
+  const handleRecovered = async (pin, recoveredData) => {
+    try {
+      const salt = await sGet("pin_salt");
+      const ph = await Crypto.hash(pin, salt);
+      const key = await Crypto.deriveKey(pin, salt);
+      const migrated = { ...INIT_DATA, ...recoveredData, creditDueDay: recoveredData.creditDueDay || 25 };
+      const ver = await sGet("data_ver"); verRef.current = ver || "0";
+      setCKey(key); setPHash(ph); setData(migrated); setTempNames(migrated.names); setTempDue(migrated.creditDueDay); setAuth(true); setPinErr("");
+    } catch { setPinErr("เกิดข้อผิดพลาด"); }
+  };
+
+  // ── Full reset ──
+  const handleFullReset = async () => {
+    try {
+      for (const k of ["pin_hash", "pin_salt", "app_data", "data_hmac", "data_ver"]) { await sSet(k, ""); }
+      setHasPin(false); setAuth(false); setCKey(null); setPHash(null); setPinErr("");
+    } catch {}
+  };
+
+  if (!isAuth) return <PinScreen mode={hasPin ? "enter" : "setup"} onOk={handleVerify} onSetup={handleSetup} lock={lockSec} onRecovered={handleRecovered} onReset={handleFullReset} />;
 
   // ═══ MAIN UI ═══
   return (
