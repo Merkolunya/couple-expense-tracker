@@ -236,6 +236,7 @@ export default function App() {
   const [lastSync, setLastSync] = useState(null);
   const [showDueSetting, setShowDueSetting] = useState(false);
   const [tempDue, setTempDue] = useState(25);
+  const [addMode, setAddMode] = useState("normal"); // normal | split
   const fileRef = useRef();
 
   // Change PIN
@@ -252,20 +253,16 @@ export default function App() {
   const [fA, setFA] = useState("");
   const [fN, setFN] = useState("");
   const [fC, setFC] = useState("food");
-  const [fS, setFS] = useState(false);
   const [fR, setFR] = useState(null);
   const [fPay, setFPay] = useState("cash"); // cash | credit
+  const [fMode, setFMode] = useState("none"); // none | half | itemized
 
-  // Split bill (itemized)
-  const [showSplit, setShowSplit] = useState(false);
-  const [splitStep, setSplitStep] = useState(1); // 1=items, 2=extras, 3=summary
-  const [splitItems0, setSplitItems0] = useState([{ name: "", price: "" }]); // person 0 items
-  const [splitItems1, setSplitItems1] = useState([{ name: "", price: "" }]); // person 1 items
-  const [splitDelivery, setSplitDelivery] = useState("");
-  const [splitCoupon, setSplitCoupon] = useState("");
-  const [splitCouponType, setSplitCouponType] = useState("all"); // all | 0 | 1
-  const [splitPayMethod, setSplitPayMethod] = useState("cash");
-  const [splitPaidBy, setSplitPaidBy] = useState(0); // who paid the whole bill
+  // Itemized split fields (only used when fMode === "itemized")
+  const [fItems0, setFItems0] = useState([{ name: "", price: "" }]);
+  const [fItems1, setFItems1] = useState([{ name: "", price: "" }]);
+  const [fDelivery, setFDelivery] = useState("");
+  const [fCoupon, setFCoupon] = useState("");
+  const [fCouponType, setFCouponType] = useState("all"); // all | 0 | 1
 
   // ── Init ──
   useEffect(() => { (async () => { try { setHasPin(!!(await sGet("pin_hash"))); Log.log("INIT", "Loaded"); } catch { setHasPin(false); } })(); }, []);
@@ -343,16 +340,56 @@ export default function App() {
     return { cashTotal, creditTotal, total: cashTotal + creditTotal, cnt: m.length, cats: Object.entries(bc).sort((a, b) => b[1] - a[1]) };
   }, [txs]);
 
-  // ── Actions ──
+  // ── Split calc (for itemized mode) ──
+  const splitCalc = useMemo(() => {
+    if (fMode !== "itemized") return null;
+    const sum = items => items.reduce((s, it) => s + (S.num(it.price, 0) || 0), 0);
+    const t0 = sum(fItems0), t1 = sum(fItems1);
+    const delivery = S.num(fDelivery, 0) || 0;
+    const coupon = S.num(fCoupon, 0) || 0;
+    const delEach = delivery / 2;
+    let disc0 = 0, disc1 = 0;
+    if (fCouponType === "all") { disc0 = coupon / 2; disc1 = coupon / 2; }
+    else if (fCouponType === "0") { disc0 = coupon; } else { disc1 = coupon; }
+    const pay0 = Math.max(0, Math.round((t0 + delEach - disc0) * 100) / 100);
+    const pay1 = Math.max(0, Math.round((t1 + delEach - disc1) * 100) / 100);
+    const total = pay0 + pay1;
+    const oweAmount = fP === 0 ? pay1 : pay0;
+    const otherPerson = fP === 0 ? 1 : 0;
+    return { t0, t1, delivery, coupon, delEach, disc0, disc1, pay0, pay1, total, oweAmount, otherPerson };
+  }, [fMode, fItems0, fItems1, fDelivery, fCoupon, fCouponType, fP]);
+
+  // ── Unified add transaction ──
   const addTx = () => {
     if (!txRL.current.ok()) { toast2("⚠️ เพิ่มบ่อยเกินไป"); return; }
-    const amt = S.num(fA, 0.01); if (!amt) { toast2("จำนวนเงินไม่ถูกต้อง 💸"); return; }
     if (txs.length >= MAX_TX) { toast2("⚠️ เกินจำนวนสูงสุด"); return; }
-    txRL.current.rec();
-    const tx = { id: data.nextId, payer: S.payer(fP), amount: amt, note: S.txt(fN, 100) || "ไม่ระบุ", category: S.cat(fC), split: !!fS, receipt: S.img(fR), payMethod: S.pay(fPay), date: new Date().toISOString(), settled: false };
-    setData(d => ({ ...d, transactions: [tx, ...d.transactions], nextId: d.nextId + 1 }));
-    setFA(""); setFN(""); setFC("food"); setFS(false); setFR(null); setFP(0); setFPay("cash"); setShowAdd(false);
-    toast2("บันทึกแล้ว! 💖");
+
+    if (fMode === "itemized") {
+      // Itemized split
+      if (!splitCalc || splitCalc.total <= 0) { toast2("ยังไม่มีรายการอาหาร"); return; }
+      txRL.current.rec();
+      const items0 = fItems0.filter(it => it.name && S.num(it.price, 0)).map(it => ({ name: S.txt(it.name, 50), price: S.num(it.price, 0) }));
+      const items1 = fItems1.filter(it => it.name && S.num(it.price, 0)).map(it => ({ name: S.txt(it.name, 50), price: S.num(it.price, 0) }));
+      const noteItems = [...items0.map(i => i.name), ...items1.map(i => i.name)].join(", ");
+      const tx = {
+        id: data.nextId, payer: S.payer(fP), amount: splitCalc.oweAmount,
+        note: S.txt(fN || noteItems || "หารแยกเมนู", 100), category: S.cat(fC), split: false, receipt: S.img(fR),
+        payMethod: S.pay(fPay), date: new Date().toISOString(), settled: false,
+        splitDetail: { items0, items1, delivery: splitCalc.delivery, coupon: splitCalc.coupon, couponType: fCouponType, pay0: splitCalc.pay0, pay1: splitCalc.pay1, paidBy: fP }
+      };
+      setData(d => ({ ...d, transactions: [tx, ...d.transactions], nextId: d.nextId + 1 }));
+    } else {
+      // Normal or half
+      const amt = S.num(fA, 0.01); if (!amt) { toast2("จำนวนเงินไม่ถูกต้อง 💸"); return; }
+      txRL.current.rec();
+      const tx = { id: data.nextId, payer: S.payer(fP), amount: amt, note: S.txt(fN, 100) || "ไม่ระบุ", category: S.cat(fC), split: fMode === "half", receipt: S.img(fR), payMethod: S.pay(fPay), date: new Date().toISOString(), settled: false };
+      setData(d => ({ ...d, transactions: [tx, ...d.transactions], nextId: d.nextId + 1 }));
+    }
+    // Reset form
+    setFA(""); setFN(""); setFC("food"); setFR(null); setFP(0); setFPay("cash"); setFMode("none");
+    setFItems0([{ name: "", price: "" }]); setFItems1([{ name: "", price: "" }]);
+    setFDelivery(""); setFCoupon(""); setFCouponType("all");
+    setShowAdd(false); toast2("บันทึกแล้ว! 💖");
   };
   const doSettle = (type) => {
     setData(d => ({ ...d, transactions: d.transactions.map(t => {
@@ -369,49 +406,6 @@ export default function App() {
   const handleFile = e => { try { const f = e.target.files?.[0]; if (!f) return; if (!["image/jpeg", "image/png", "image/webp", "image/gif"].includes(f.type)) { toast2("⚠️ รองรับเฉพาะรูปภาพ"); return; } if (f.size > MAX_IMG * 1024 * 1024) { toast2(`⚠️ เกิน ${MAX_IMG}MB`); return; } const r = new FileReader(); r.onerror = () => toast2("⚠️ อ่านไม่ได้"); r.onload = ev => { const v = S.img(ev.target.result); if (v) setFR(v); else toast2("⚠️ ไม่ถูกต้อง"); }; r.readAsDataURL(f); } catch { toast2("⚠️ ผิดพลาด"); } };
   const saveNm = () => { const a = S.txt(tempNames[0], 20), b = S.txt(tempNames[1], 20); if (a && b) { setData(d => ({ ...d, names: [a, b] })); setEditNames(false); toast2("เปลี่ยนชื่อแล้ว! 💕"); } };
   const saveDue = () => { const d = parseInt(tempDue, 10); if (d >= 1 && d <= 31) { setData(prev => ({ ...prev, creditDueDay: d })); setShowDueSetting(false); toast2(`ตั้งวันครบกำหนดเป็นวันที่ ${d} แล้ว! 💳`); } };
-
-  // ── Split bill helpers ──
-  const openSplitBill = () => {
-    setSplitItems0([{ name: "", price: "" }]); setSplitItems1([{ name: "", price: "" }]);
-    setSplitDelivery(""); setSplitCoupon(""); setSplitCouponType("all");
-    setSplitPayMethod("cash"); setSplitPaidBy(0); setSplitStep(1); setShowSplit(true);
-  };
-
-  const splitCalc = useMemo(() => {
-    const sum = items => items.reduce((s, it) => s + (S.num(it.price, 0) || 0), 0);
-    const t0 = sum(splitItems0), t1 = sum(splitItems1);
-    const delivery = S.num(splitDelivery, 0) || 0;
-    const coupon = S.num(splitCoupon, 0) || 0;
-    const delEach = delivery / 2;
-    let disc0 = 0, disc1 = 0;
-    if (splitCouponType === "all") { disc0 = coupon / 2; disc1 = coupon / 2; }
-    else if (splitCouponType === "0") { disc0 = coupon; }
-    else { disc1 = coupon; }
-    const pay0 = Math.max(0, Math.round((t0 + delEach - disc0) * 100) / 100);
-    const pay1 = Math.max(0, Math.round((t1 + delEach - disc1) * 100) / 100);
-    const total = pay0 + pay1;
-    const otherPerson = splitPaidBy === 0 ? 1 : 0;
-    const oweAmount = splitPaidBy === 0 ? pay1 : pay0;
-    return { t0, t1, delivery, coupon, delEach, disc0, disc1, pay0, pay1, total, otherPerson, oweAmount };
-  }, [splitItems0, splitItems1, splitDelivery, splitCoupon, splitCouponType, splitPaidBy]);
-
-  const addSplitBill = () => {
-    if (splitCalc.total <= 0) { toast2("ยังไม่มีรายการอาหาร"); return; }
-    if (txs.length >= MAX_TX) { toast2("⚠️ เกินจำนวนสูงสุด"); return; }
-    const itemsSummary0 = splitItems0.filter(it => it.name && S.num(it.price, 0)).map(it => ({ name: S.txt(it.name, 50), price: S.num(it.price, 0) }));
-    const itemsSummary1 = splitItems1.filter(it => it.name && S.num(it.price, 0)).map(it => ({ name: S.txt(it.name, 50), price: S.num(it.price, 0) }));
-    const noteItems = [...itemsSummary0.map(i => i.name), ...itemsSummary1.map(i => i.name)].join(", ");
-    const note = S.txt(noteItems || "หารแยกเมนู", 100);
-    // Record as: the person who DIDN'T pay owes the person who paid
-    const tx = {
-      id: data.nextId, payer: splitPaidBy, amount: splitCalc.oweAmount,
-      note, category: "food", split: false, receipt: null,
-      payMethod: S.pay(splitPayMethod), date: new Date().toISOString(), settled: false,
-      splitDetail: { items0: itemsSummary0, items1: itemsSummary1, delivery: splitCalc.delivery, coupon: splitCalc.coupon, couponType: splitCouponType, pay0: splitCalc.pay0, pay1: splitCalc.pay1, paidBy: splitPaidBy }
-    };
-    setData(d => ({ ...d, transactions: [tx, ...d.transactions], nextId: d.nextId + 1 }));
-    setShowSplit(false); toast2("บันทึกหารแยกเมนูแล้ว! 📝");
-  };
 
   // Change PIN
   const openCP = () => { setCpStep("old"); setCpOld(""); setCpNew(""); setCpConf(""); setCpErr(""); setShowCP(true); };
@@ -496,149 +490,6 @@ export default function App() {
         <button onClick={() => setShowSettle(false)} style={{ ...bt(false), width: "100%" }}>ยกเลิก</button>
       </div></div>}
 
-      {/* Split Bill Modal */}
-      {showSplit && <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.35)", zIndex: 800, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
-        <div style={{ background: "white", borderRadius: "24px 24px 0 0", padding: "24px 20px 36px", width: "100%", maxWidth: 420, maxHeight: "90vh", overflowY: "auto", animation: "slideUp .3s ease" }}>
-          <div style={{ textAlign: "center", marginBottom: 16 }}>
-            <div style={{ width: 40, height: 4, background: "#eee", borderRadius: 2, margin: "0 auto 14px" }} />
-            <h3 style={{ margin: 0, color: pkd, fontSize: 17, fontWeight: 800 }}>📋 หารแยกเมนู</h3>
-            {/* Step indicator */}
-            <div style={{ display: "flex", justifyContent: "center", gap: 6, marginTop: 12 }}>
-              {[{ n: 1, l: "รายการ" }, { n: 2, l: "ค่าส่ง+คูปอง" }, { n: 3, l: "สรุป" }].map(s => (
-                <div key={s.n} style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                  <div style={{ width: 22, height: 22, borderRadius: "50%", fontSize: 10, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center", background: splitStep === s.n ? pk : splitStep > s.n ? "#e8f5e9" : "#f5f5f5", color: splitStep === s.n ? "white" : splitStep > s.n ? "#43a047" : "#ccc" }}>{splitStep > s.n ? "✓" : s.n}</div>
-                  <span style={{ fontSize: 11, color: splitStep === s.n ? pkd : "#ccc" }}>{s.l}</span>
-                  {s.n < 3 && <div style={{ width: 12, height: 1.5, background: "#eee" }} />}
-                </div>
-              ))}
-            </div>
-          </div>
-
-          {/* STEP 1: Items */}
-          {splitStep === 1 && <>
-            {[0, 1].map(pi => (
-              <div key={pi} style={{ marginBottom: 16 }}>
-                <p style={{ fontSize: 13, fontWeight: 700, color: pi === 0 ? pkd : "#1565c0", margin: "0 0 8px" }}>{pi === 0 ? "💁‍♀️" : "💁‍♂️"} {names[pi]}</p>
-                {(pi === 0 ? splitItems0 : splitItems1).map((item, idx) => (
-                  <div key={idx} style={{ display: "flex", gap: 8, marginBottom: 6 }}>
-                    <input value={item.name} placeholder="ชื่อเมนู" maxLength={50} onChange={e => {
-                      const fn = pi === 0 ? setSplitItems0 : setSplitItems1;
-                      fn(prev => { const n = [...prev]; n[idx] = { ...n[idx], name: e.target.value }; return n; });
-                    }} style={{ flex: 1, padding: "10px 12px", borderRadius: 10, border: `1.5px solid ${pi === 0 ? pks : "#bbdefb"}`, fontSize: 13, fontFamily: F, outline: "none", boxSizing: "border-box" }} />
-                    <input type="number" value={item.price} placeholder="฿" onChange={e => {
-                      const fn = pi === 0 ? setSplitItems0 : setSplitItems1;
-                      fn(prev => { const n = [...prev]; n[idx] = { ...n[idx], price: e.target.value }; return n; });
-                    }} style={{ width: 80, padding: "10px 8px", borderRadius: 10, border: `1.5px solid ${pi === 0 ? pks : "#bbdefb"}`, fontSize: 13, fontFamily: F, textAlign: "right", outline: "none", boxSizing: "border-box" }} />
-                    {(pi === 0 ? splitItems0 : splitItems1).length > 1 && <button onClick={() => {
-                      const fn = pi === 0 ? setSplitItems0 : setSplitItems1;
-                      fn(prev => prev.filter((_, i) => i !== idx));
-                    }} style={{ background: "#fff0f0", border: "none", borderRadius: 8, padding: "0 10px", fontSize: 14, cursor: "pointer", color: "#e57373" }}>✕</button>}
-                  </div>
-                ))}
-                <button onClick={() => {
-                  const fn = pi === 0 ? setSplitItems0 : setSplitItems1;
-                  fn(prev => [...prev, { name: "", price: "" }]);
-                }} style={{ background: "none", border: "none", color: pi === 0 ? pk : "#1565c0", fontSize: 12, cursor: "pointer", fontFamily: F, padding: "4px 0" }}>+ เพิ่มเมนู</button>
-              </div>
-            ))}
-            <button onClick={() => setSplitStep(2)} style={{ ...bt(true), width: "100%", padding: 14 }}>ถัดไป →</button>
-            <button onClick={() => setShowSplit(false)} style={{ ...bt(false), width: "100%", marginTop: 8 }}>ยกเลิก</button>
-          </>}
-
-          {/* STEP 2: Delivery + Coupon + Payment */}
-          {splitStep === 2 && <>
-            <label style={{ fontSize: 13, fontWeight: 700, color: "#b0728a", display: "block", marginBottom: 8 }}>🚗 ค่าส่ง (หารเท่าๆ กัน)</label>
-            <input type="number" value={splitDelivery} onChange={e => setSplitDelivery(e.target.value)} placeholder="0" style={{ width: "100%", padding: "12px 16px", borderRadius: 12, border: `2px solid ${pks}`, fontSize: 18, fontWeight: 700, fontFamily: F, color: pkd, textAlign: "center", marginBottom: 16, boxSizing: "border-box", outline: "none" }} />
-
-            <label style={{ fontSize: 13, fontWeight: 700, color: "#b0728a", display: "block", marginBottom: 8 }}>🎟️ คูปองส่วนลด</label>
-            <input type="number" value={splitCoupon} onChange={e => setSplitCoupon(e.target.value)} placeholder="0" style={{ width: "100%", padding: "12px 16px", borderRadius: 12, border: `2px solid ${pks}`, fontSize: 18, fontWeight: 700, fontFamily: F, color: "#43a047", textAlign: "center", marginBottom: 10, boxSizing: "border-box", outline: "none" }} />
-            <div style={{ display: "flex", gap: 8, marginBottom: 18 }}>
-              {[{ v: "all", l: "ลดทั้งบิล" }, { v: "0", l: `ลดเฉพาะ ${names[0]}` }, { v: "1", l: `ลดเฉพาะ ${names[1]}` }].map(o => (
-                <button key={o.v} onClick={() => setSplitCouponType(o.v)} style={{ flex: 1, padding: "10px 4px", borderRadius: 10, border: splitCouponType === o.v ? `2px solid ${pk}` : "2px solid #eee", background: splitCouponType === o.v ? pkl : "white", color: splitCouponType === o.v ? pkd : "#999", fontWeight: 600, fontSize: 11, cursor: "pointer", fontFamily: F }}>{o.l}</button>
-              ))}
-            </div>
-
-            <label style={{ fontSize: 13, fontWeight: 700, color: "#b0728a", display: "block", marginBottom: 8 }}>จ่ายด้วย</label>
-            <div style={{ display: "flex", gap: 8, marginBottom: 18 }}>
-              <button onClick={() => setSplitPayMethod("cash")} style={{ flex: 1, padding: 10, borderRadius: 12, border: splitPayMethod === "cash" ? "2px solid #ef6c00" : "2px solid #eee", background: splitPayMethod === "cash" ? "#fff8e1" : "white", color: splitPayMethod === "cash" ? "#ef6c00" : "#999", fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: F }}>💵 เงินสด</button>
-              <button onClick={() => setSplitPayMethod("credit")} style={{ flex: 1, padding: 10, borderRadius: 12, border: splitPayMethod === "credit" ? "2px solid #1565c0" : "2px solid #eee", background: splitPayMethod === "credit" ? "#e3f2fd" : "white", color: splitPayMethod === "credit" ? "#1565c0" : "#999", fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: F }}>💳 บัตรเครดิต</button>
-            </div>
-
-            <label style={{ fontSize: 13, fontWeight: 700, color: "#b0728a", display: "block", marginBottom: 8 }}>ใครจ่ายไปก่อนทั้งบิล?</label>
-            <div style={{ display: "flex", gap: 8, marginBottom: 18 }}>
-              {[0, 1].map(i => <button key={i} onClick={() => setSplitPaidBy(i)} style={{ flex: 1, padding: 12, borderRadius: 12, border: splitPaidBy === i ? `2px solid ${pk}` : `2px solid ${pks}`, background: splitPaidBy === i ? pkl : "white", color: splitPaidBy === i ? pkd : "#b0728a", fontWeight: 700, fontSize: 14, cursor: "pointer", fontFamily: F }}>{i === 0 ? "💁‍♀️" : "💁‍♂️"} {names[i]}</button>)}
-            </div>
-
-            <div style={{ display: "flex", gap: 8 }}>
-              <button onClick={() => setSplitStep(1)} style={{ ...bt(false), flex: 1 }}>← กลับ</button>
-              <button onClick={() => setSplitStep(3)} style={{ ...bt(true), flex: 1 }}>ดูสรุป →</button>
-            </div>
-          </>}
-
-          {/* STEP 3: Summary */}
-          {splitStep === 3 && <>
-            <div style={{ background: "#f9f9f9", borderRadius: 14, padding: 16, marginBottom: 16 }}>
-              {/* Person 0 items */}
-              <p style={{ fontSize: 12, fontWeight: 700, color: pkd, margin: "0 0 6px" }}>💁‍♀️ {names[0]}</p>
-              {splitItems0.filter(it => it.name && S.num(it.price, 0)).map((it, i) => (
-                <div key={i} style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: "#4a2036", padding: "2px 0" }}>
-                  <span>{it.name}</span><span style={{ fontWeight: 600 }}>฿{fmt(S.num(it.price, 0))}</span>
-                </div>
-              ))}
-              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, fontWeight: 700, color: pkd, padding: "4px 0", borderTop: "1px dashed #eee", marginTop: 4 }}>
-                <span>รวม</span><span>฿{fmt(splitCalc.t0)}</span>
-              </div>
-
-              <p style={{ fontSize: 12, fontWeight: 700, color: "#1565c0", margin: "12px 0 6px" }}>💁‍♂️ {names[1]}</p>
-              {splitItems1.filter(it => it.name && S.num(it.price, 0)).map((it, i) => (
-                <div key={i} style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: "#4a2036", padding: "2px 0" }}>
-                  <span>{it.name}</span><span style={{ fontWeight: 600 }}>฿{fmt(S.num(it.price, 0))}</span>
-                </div>
-              ))}
-              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, fontWeight: 700, color: "#1565c0", padding: "4px 0", borderTop: "1px dashed #eee", marginTop: 4 }}>
-                <span>รวม</span><span>฿{fmt(splitCalc.t1)}</span>
-              </div>
-
-              {splitCalc.delivery > 0 && <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: "#666", padding: "6px 0", borderTop: "1px solid #eee", marginTop: 8 }}>
-                <span>🚗 ค่าส่ง (คนละ)</span><span>+฿{fmt(splitCalc.delEach)}</span>
-              </div>}
-              {splitCalc.coupon > 0 && <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: "#43a047", padding: "4px 0" }}>
-                <span>🎟️ คูปอง ({splitCouponType === "all" ? "ลดทั้งบิล" : `ลดเฉพาะ ${names[parseInt(splitCouponType)]}`})</span><span>-฿{fmt(splitCalc.coupon)}</span>
-              </div>}
-            </div>
-
-            {/* Final amounts */}
-            <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
-              <div style={{ flex: 1, padding: 14, borderRadius: 14, background: pkl, textAlign: "center" }}>
-                <div style={{ fontSize: 11, color: "#b0728a" }}>💁‍♀️ {names[0]} จ่าย</div>
-                <div style={{ fontSize: 22, fontWeight: 800, color: pkd, marginTop: 4 }}>฿{fmt(splitCalc.pay0)}</div>
-              </div>
-              <div style={{ flex: 1, padding: 14, borderRadius: 14, background: "#e3f2fd", textAlign: "center" }}>
-                <div style={{ fontSize: 11, color: "#5c6bc0" }}>💁‍♂️ {names[1]} จ่าย</div>
-                <div style={{ fontSize: 22, fontWeight: 800, color: "#1565c0", marginTop: 4 }}>฿{fmt(splitCalc.pay1)}</div>
-              </div>
-            </div>
-
-            {/* Who paid + who owes */}
-            <div style={{ padding: "12px 16px", borderRadius: 12, background: "#fff8e1", marginBottom: 16 }}>
-              <div style={{ fontSize: 13, fontWeight: 700, color: "#e65100", textAlign: "center" }}>
-                {splitPaidBy === 0 ? "💁‍♀️" : "💁‍♂️"} {names[splitPaidBy]} จ่ายไปก่อนทั้งบิล ฿{fmt(splitCalc.total)}
-              </div>
-              <div style={{ fontSize: 14, fontWeight: 800, color: pkd, textAlign: "center", marginTop: 6 }}>
-                → {splitPaidBy === 0 ? "💁‍♂️" : "💁‍♀️"} {names[splitCalc.otherPerson]} ต้องโอนคืน ฿{fmt(splitCalc.oweAmount)}
-              </div>
-              <div style={{ fontSize: 11, color: "#b0728a", textAlign: "center", marginTop: 4 }}>
-                {splitPayMethod === "credit" ? "💳 บัตรเครดิต" : "💵 เงินสด"} • บันทึกเข้ายอดค้างอัตโนมัติ
-              </div>
-            </div>
-
-            <div style={{ display: "flex", gap: 8 }}>
-              <button onClick={() => setSplitStep(2)} style={{ ...bt(false), flex: 1 }}>← กลับ</button>
-              <button onClick={addSplitBill} style={{ ...bt(true), flex: 1 }}>บันทึก 💖</button>
-            </div>
-          </>}
-        </div>
-      </div>}
 
       <div style={{ maxWidth: 420, margin: "0 auto", padding: "0 16px 100px", position: "relative", zIndex: 1 }}>
         {/* Header */}
@@ -761,40 +612,122 @@ export default function App() {
         </div>
       </div>
 
-      {/* FAB + Split Bill Button */}
-      <div style={{ position: "fixed", bottom: 28, left: "50%", transform: "translateX(-50%)", display: "flex", gap: 12, zIndex: 100 }}>
-        <button onClick={openSplitBill} style={{ width: 52, height: 52, borderRadius: "50%", background: "white", color: pkd, fontSize: 20, border: `2px solid ${pks}`, cursor: "pointer", boxShadow: "0 4px 16px rgba(232,98,140,.2)", display: "flex", alignItems: "center", justifyContent: "center" }}>📋</button>
-        <button onClick={() => setShowAdd(true)} style={{ width: 64, height: 64, borderRadius: "50%", background: `linear-gradient(135deg,${pk},${pkd})`, color: "white", fontSize: 32, border: "none", cursor: "pointer", boxShadow: "0 6px 24px rgba(232,98,140,.35)", display: "flex", alignItems: "center", justifyContent: "center" }}>+</button>
-      </div>
+      {/* FAB */}
+      <button onClick={() => { setFMode("none"); setShowAdd(true); }} style={{ position: "fixed", bottom: 28, right: "calc(50% - 32px)", width: 64, height: 64, borderRadius: "50%", background: `linear-gradient(135deg,${pk},${pkd})`, color: "white", fontSize: 32, border: "none", cursor: "pointer", boxShadow: "0 6px 24px rgba(232,98,140,.35)", zIndex: 100, display: "flex", alignItems: "center", justifyContent: "center" }}>+</button>
 
-      {/* Add Modal */}
+      {/* Unified Add Modal */}
       {showAdd && <div onClick={e => e.target === e.currentTarget && setShowAdd(false)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.35)", zIndex: 800, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
         <div style={{ background: "white", borderRadius: "24px 24px 0 0", padding: "28px 24px 36px", width: "100%", maxWidth: 420, maxHeight: "85vh", overflowY: "auto", animation: "slideUp .3s ease" }}>
           <div style={{ textAlign: "center", marginBottom: 20 }}><div style={{ width: 40, height: 4, background: "#eee", borderRadius: 2, margin: "0 auto 16px" }} /><h3 style={{ margin: 0, color: pkd, fontSize: 18, fontWeight: 800 }}>💸 เพิ่มรายการใหม่</h3></div>
 
-          {/* Payment Method Toggle */}
+          {/* Payment Method */}
           <label style={{ fontSize: 13, fontWeight: 700, color: "#b0728a", display: "block", marginBottom: 8 }}>จ่ายด้วย</label>
-          <div style={{ display: "flex", gap: 10, marginBottom: 18 }}>
+          <div style={{ display: "flex", gap: 10, marginBottom: 14 }}>
             <button onClick={() => setFPay("cash")} style={{ flex: 1, padding: "12px", borderRadius: 14, border: fPay === "cash" ? "2px solid #ef6c00" : "2px solid #eee", background: fPay === "cash" ? "#fff8e1" : "white", color: fPay === "cash" ? "#ef6c00" : "#999", fontWeight: 700, fontSize: 14, cursor: "pointer", fontFamily: F }}>💵 เงินสด</button>
             <button onClick={() => setFPay("credit")} style={{ flex: 1, padding: "12px", borderRadius: 14, border: fPay === "credit" ? "2px solid #1565c0" : "2px solid #eee", background: fPay === "credit" ? "#e3f2fd" : "white", color: fPay === "credit" ? "#1565c0" : "#999", fontWeight: 700, fontSize: 14, cursor: "pointer", fontFamily: F }}>💳 บัตรเครดิต</button>
           </div>
-          {fPay === "credit" && <div style={{ padding: "8px 14px", background: "#e3f2fd", borderRadius: 10, fontSize: 12, color: "#1565c0", marginBottom: 14, marginTop: -8 }}>💳 ยอดนี้จะรอเคลียร์จนถึงวันจ่ายบัตร (วันที่ {dueDay})</div>}
+          {fPay === "credit" && <div style={{ padding: "8px 14px", background: "#e3f2fd", borderRadius: 10, fontSize: 12, color: "#1565c0", marginBottom: 14, marginTop: -4 }}>💳 ยอดนี้จะรอเคลียร์จนถึงวันจ่ายบัตร (วันที่ {dueDay})</div>}
 
-          <label style={{ fontSize: 13, fontWeight: 700, color: "#b0728a", display: "block", marginBottom: 8 }}>ใครจ่าย?</label>
-          <div style={{ display: "flex", gap: 10, marginBottom: 18 }}>{[0, 1].map(i => <button key={i} onClick={() => setFP(i)} style={{ flex: 1, padding: 12, borderRadius: 14, border: fP === i ? `2px solid ${pk}` : `2px solid ${pks}`, background: fP === i ? pkl : "white", color: fP === i ? pkd : "#b0728a", fontWeight: 700, fontSize: 14, cursor: "pointer", fontFamily: F }}>{i === 0 ? "💁‍♀️" : "💁‍♂️"} {names[i]}</button>)}</div>
-          <label style={{ fontSize: 13, fontWeight: 700, color: "#b0728a", display: "block", marginBottom: 8 }}>จำนวนเงิน (บาท)</label>
-          <input type="number" value={fA} onChange={e => setFA(e.target.value)} placeholder="0" min="0.01" max="9999999" step="0.01" style={{ width: "100%", padding: "14px 16px", borderRadius: 14, border: `2px solid ${pks}`, fontSize: 24, fontWeight: 800, fontFamily: F, color: pkd, textAlign: "center", marginBottom: 18, boxSizing: "border-box", outline: "none" }} />
-          <div onClick={() => setFS(!fS)} style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 16px", borderRadius: 14, background: fS ? pkl : "#f9f9f9", border: fS ? `2px solid ${pk}` : "2px solid #eee", cursor: "pointer", marginBottom: 18 }}>
-            <span style={{ fontSize: 20 }}>✂️</span><div style={{ flex: 1 }}><div style={{ fontWeight: 700, fontSize: 14, color: fS ? pkd : "#888" }}>หารสองเท่าๆ กัน</div>{fS && fA && S.num(fA) && <div style={{ fontSize: 12, color: pk, fontWeight: 600 }}>คนละ ฿{fmt(S.num(fA) / 2)}</div>}</div>
-            <div style={{ width: 44, height: 26, borderRadius: 13, background: fS ? pk : "#ddd", position: "relative" }}><div style={{ width: 22, height: 22, borderRadius: "50%", background: "white", position: "absolute", top: 2, left: fS ? 20 : 2, transition: "all .2s", boxShadow: "0 1px 4px rgba(0,0,0,.15)" }} /></div>
+          {/* Who paid */}
+          <label style={{ fontSize: 13, fontWeight: 700, color: "#b0728a", display: "block", marginBottom: 8 }}>ใครจ่าย{fMode === "itemized" ? "ไปก่อนทั้งบิล" : ""}?</label>
+          <div style={{ display: "flex", gap: 10, marginBottom: 14 }}>{[0, 1].map(i => <button key={i} onClick={() => setFP(i)} style={{ flex: 1, padding: 12, borderRadius: 14, border: fP === i ? `2px solid ${pk}` : `2px solid ${pks}`, background: fP === i ? pkl : "white", color: fP === i ? pkd : "#b0728a", fontWeight: 700, fontSize: 14, cursor: "pointer", fontFamily: F }}>{i === 0 ? "💁‍♀️" : "💁‍♂️"} {names[i]}</button>)}</div>
+
+          {/* Split mode toggle */}
+          <label style={{ fontSize: 13, fontWeight: 700, color: "#b0728a", display: "block", marginBottom: 8 }}>แบ่งจ่ายแบบไหน?</label>
+          <div style={{ display: "flex", gap: 8, marginBottom: 18 }}>
+            {[{ v: "none", icon: "💰", l: "ไม่แบ่ง", sub: "คนเดียวจ่าย" }, { v: "half", icon: "✂️", l: "หารครึ่ง", sub: "50/50" }, { v: "itemized", icon: "📋", l: "แยกเมนู", sub: "ใส่รายการ" }].map(o => (
+              <button key={o.v} onClick={() => setFMode(o.v)} style={{ flex: 1, padding: "10px 4px", borderRadius: 12, border: fMode === o.v ? `2px solid ${pk}` : "2px solid #eee", background: fMode === o.v ? pkl : "white", color: fMode === o.v ? pkd : "#999", fontWeight: 600, fontSize: 11, cursor: "pointer", fontFamily: F, textAlign: "center" }}>
+                <div style={{ fontSize: 18, marginBottom: 2 }}>{o.icon}</div>{o.l}<br /><span style={{ fontSize: 10, opacity: .7 }}>{o.sub}</span>
+              </button>
+            ))}
           </div>
+
+          {/* Normal / Half: simple amount */}
+          {fMode !== "itemized" && <>
+            <label style={{ fontSize: 13, fontWeight: 700, color: "#b0728a", display: "block", marginBottom: 8 }}>จำนวนเงิน (บาท)</label>
+            <input type="number" value={fA} onChange={e => setFA(e.target.value)} placeholder="0" min="0.01" max="9999999" step="0.01" style={{ width: "100%", padding: "14px 16px", borderRadius: 14, border: `2px solid ${pks}`, fontSize: 24, fontWeight: 800, fontFamily: F, color: pkd, textAlign: "center", marginBottom: 4, boxSizing: "border-box", outline: "none" }} />
+            {fMode === "half" && fA && S.num(fA) && <p style={{ textAlign: "center", fontSize: 13, color: pk, fontWeight: 600, margin: "0 0 14px" }}>คนละ ฿{fmt(S.num(fA) / 2)}</p>}
+            {fMode !== "half" && <div style={{ marginBottom: 14 }} />}
+          </>}
+
+          {/* Itemized: items per person + delivery + coupon */}
+          {fMode === "itemized" && <>
+            {[0, 1].map(pi => (
+              <div key={pi} style={{ marginBottom: 14 }}>
+                <p style={{ fontSize: 13, fontWeight: 700, color: pi === 0 ? pkd : "#1565c0", margin: "0 0 8px" }}>{pi === 0 ? "💁‍♀️" : "💁‍♂️"} {names[pi]} สั่ง</p>
+                {(pi === 0 ? fItems0 : fItems1).map((item, idx) => (
+                  <div key={idx} style={{ display: "flex", gap: 6, marginBottom: 6 }}>
+                    <input value={item.name} placeholder="ชื่อเมนู" maxLength={50} onChange={e => {
+                      const fn = pi === 0 ? setFItems0 : setFItems1;
+                      fn(prev => { const n = [...prev]; n[idx] = { ...n[idx], name: e.target.value }; return n; });
+                    }} style={{ flex: 1, padding: "10px 12px", borderRadius: 10, border: `1.5px solid ${pi === 0 ? pks : "#bbdefb"}`, fontSize: 13, fontFamily: F, outline: "none", boxSizing: "border-box" }} />
+                    <input type="number" value={item.price} placeholder="฿" onChange={e => {
+                      const fn = pi === 0 ? setFItems0 : setFItems1;
+                      fn(prev => { const n = [...prev]; n[idx] = { ...n[idx], price: e.target.value }; return n; });
+                    }} style={{ width: 75, padding: "10px 8px", borderRadius: 10, border: `1.5px solid ${pi === 0 ? pks : "#bbdefb"}`, fontSize: 13, fontFamily: F, textAlign: "right", outline: "none", boxSizing: "border-box" }} />
+                    {(pi === 0 ? fItems0 : fItems1).length > 1 && <button onClick={() => {
+                      const fn = pi === 0 ? setFItems0 : setFItems1;
+                      fn(prev => prev.filter((_, i) => i !== idx));
+                    }} style={{ background: "#fff0f0", border: "none", borderRadius: 8, padding: "0 8px", fontSize: 13, cursor: "pointer", color: "#e57373" }}>✕</button>}
+                  </div>
+                ))}
+                <button onClick={() => { const fn = pi === 0 ? setFItems0 : setFItems1; fn(prev => [...prev, { name: "", price: "" }]); }}
+                  style={{ background: "none", border: "none", color: pi === 0 ? pk : "#1565c0", fontSize: 12, cursor: "pointer", fontFamily: F, padding: "4px 0" }}>+ เพิ่มเมนู</button>
+              </div>
+            ))}
+
+            {/* Delivery + Coupon */}
+            <div style={{ borderTop: `1.5px solid ${pks}`, paddingTop: 14, marginBottom: 14 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+                <span style={{ fontSize: 13, color: "#b0728a", minWidth: 55 }}>🚗 ค่าส่ง</span>
+                <input type="number" value={fDelivery} onChange={e => setFDelivery(e.target.value)} placeholder="0" style={{ flex: 1, padding: "10px 12px", borderRadius: 10, border: `1.5px solid ${pks}`, fontSize: 14, fontFamily: F, textAlign: "right", outline: "none", boxSizing: "border-box" }} />
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+                <span style={{ fontSize: 13, color: "#b0728a", minWidth: 55 }}>🎟️ คูปอง</span>
+                <input type="number" value={fCoupon} onChange={e => setFCoupon(e.target.value)} placeholder="0" style={{ flex: 1, padding: "10px 12px", borderRadius: 10, border: `1.5px solid ${pks}`, fontSize: 14, fontFamily: F, textAlign: "right", color: "#43a047", outline: "none", boxSizing: "border-box" }} />
+              </div>
+              {(S.num(fCoupon, 0) || 0) > 0 && <div style={{ display: "flex", gap: 6, marginBottom: 14 }}>
+                {[{ v: "all", l: "ลดทั้งบิล" }, { v: "0", l: `ลดเฉพาะ ${names[0]}` }, { v: "1", l: `ลดเฉพาะ ${names[1]}` }].map(o => (
+                  <button key={o.v} onClick={() => setFCouponType(o.v)} style={{ flex: 1, padding: "8px 2px", borderRadius: 8, border: fCouponType === o.v ? `2px solid ${pk}` : "1.5px solid #eee", background: fCouponType === o.v ? pkl : "white", color: fCouponType === o.v ? pkd : "#999", fontWeight: 600, fontSize: 10, cursor: "pointer", fontFamily: F }}>{o.l}</button>
+                ))}
+              </div>}
+            </div>
+
+            {/* Live summary */}
+            {splitCalc && splitCalc.total > 0 && <div style={{ border: `1.5px solid ${pk}`, borderRadius: 14, padding: 14, marginBottom: 14, background: "linear-gradient(135deg,#fff0f3,#fce4ec)" }}>
+              <p style={{ fontSize: 12, fontWeight: 700, color: pkd, margin: "0 0 8px", textAlign: "center" }}>📊 สรุปยอด</p>
+              <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+                <div style={{ flex: 1, textAlign: "center" }}>
+                  <div style={{ fontSize: 10, color: "#b0728a" }}>💁‍♀️ {names[0]}</div>
+                  <div style={{ fontSize: 18, fontWeight: 800, color: pkd }}> ฿{fmt(splitCalc.pay0)}</div>
+                  <div style={{ fontSize: 9, color: "#cca0b3" }}>{fmt(splitCalc.t0)}+{fmt(splitCalc.delEach)}-{fmt(splitCalc.disc0)}</div>
+                </div>
+                <div style={{ flex: 1, textAlign: "center" }}>
+                  <div style={{ fontSize: 10, color: "#5c6bc0" }}>💁‍♂️ {names[1]}</div>
+                  <div style={{ fontSize: 18, fontWeight: 800, color: "#1565c0" }}>฿{fmt(splitCalc.pay1)}</div>
+                  <div style={{ fontSize: 9, color: "#90a4ae" }}>{fmt(splitCalc.t1)}+{fmt(splitCalc.delEach)}-{fmt(splitCalc.disc1)}</div>
+                </div>
+              </div>
+              <div style={{ padding: "8px 12px", background: "#fff8e1", borderRadius: 10, textAlign: "center", fontSize: 12, fontWeight: 700, color: "#e65100" }}>
+                {fP === 0 ? "💁‍♀️" : "💁‍♂️"} {names[fP]} จ่ายไปก่อน ฿{fmt(splitCalc.total)} → {fP === 0 ? "💁‍♂️" : "💁‍♀️"} {names[splitCalc.otherPerson]} ต้องโอนคืน <span style={{ fontSize: 14 }}>฿{fmt(splitCalc.oweAmount)}</span>
+              </div>
+            </div>}
+          </>}
+
+          {/* Note */}
           <label style={{ fontSize: 13, fontWeight: 700, color: "#b0728a", display: "block", marginBottom: 8 }}>รายละเอียด</label>
-          <input value={fN} onChange={e => setFN(e.target.value)} placeholder="เช่น ค่าข้าวกลางวัน" maxLength={100} style={{ width: "100%", padding: "12px 16px", borderRadius: 14, border: `2px solid ${pks}`, fontSize: 15, fontFamily: F, marginBottom: 18, boxSizing: "border-box", outline: "none" }} />
+          <input value={fN} onChange={e => setFN(e.target.value)} placeholder={fMode === "itemized" ? "เช่น LINE MAN วันนี้" : "เช่น ค่าข้าวกลางวัน"} maxLength={100} style={{ width: "100%", padding: "12px 16px", borderRadius: 14, border: `2px solid ${pks}`, fontSize: 15, fontFamily: F, marginBottom: 18, boxSizing: "border-box", outline: "none" }} />
+
+          {/* Category */}
           <label style={{ fontSize: 13, fontWeight: 700, color: "#b0728a", display: "block", marginBottom: 8 }}>หมวดหมู่</label>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 8, marginBottom: 18 }}>{CATS.map(c => <button key={c.id} onClick={() => setFC(c.id)} style={{ padding: "10px 8px", borderRadius: 12, border: fC === c.id ? `2px solid ${pk}` : "2px solid #eee", background: fC === c.id ? pkl : "white", color: fC === c.id ? pkd : "#888", fontWeight: 600, fontSize: 12, cursor: "pointer", fontFamily: F }}>{c.e} {c.l}</button>)}</div>
+
+          {/* Receipt */}
           <label style={{ fontSize: 13, fontWeight: 700, color: "#b0728a", display: "block", marginBottom: 8 }}>แนบรูปบิล (สูงสุด {MAX_IMG}MB)</label>
           <input ref={fileRef} type="file" accept="image/jpeg,image/png,image/webp,image/gif" onChange={handleFile} style={{ display: "none" }} />
           {fR ? <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 18 }}><img src={fR} style={{ width: 56, height: 56, objectFit: "cover", borderRadius: 12 }} /><button onClick={() => setFR(null)} style={{ background: "#fff0f0", border: "none", color: "#e57373", padding: "8px 14px", borderRadius: 10, fontSize: 13, cursor: "pointer", fontFamily: F, fontWeight: 600 }}>ลบรูป</button></div> : <button onClick={() => fileRef.current?.click()} style={{ width: "100%", padding: 12, borderRadius: 14, border: `2px dashed ${pks}`, background: "transparent", color: "#b0728a", fontSize: 14, cursor: "pointer", fontFamily: F, marginBottom: 18 }}>📷 กดเพื่อแนบรูป</button>}
+
+          {/* Submit */}
           <button onClick={addTx} style={{ ...bt(true), width: "100%", padding: 16 }}>บันทึกรายการ 💖</button>
         </div>
       </div>}
