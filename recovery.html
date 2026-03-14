@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>🔓 กู้ข้อมูล Couple Expense Tracker</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, 'Sarabun', sans-serif; background: linear-gradient(160deg, #fff0f3, #ffe0ec, #fce4ec); min-height: 100vh; padding: 20px; }
+.card { background: rgba(255,255,255,0.9); border-radius: 20px; padding: 24px; margin: 0 auto 16px; max-width: 400px; box-shadow: 0 4px 24px rgba(232,98,140,0.12); }
+h1 { color: #c2185b; font-size: 20px; text-align: center; margin-bottom: 8px; }
+h2 { color: #c2185b; font-size: 16px; margin-bottom: 12px; }
+p { color: #b0728a; font-size: 13px; text-align: center; margin-bottom: 16px; line-height: 1.5; }
+.btn { width: 100%; padding: 14px; border-radius: 14px; border: none; font-size: 16px; font-weight: 700; cursor: pointer; margin-bottom: 10px; font-family: inherit; }
+.btn-primary { background: linear-gradient(135deg, #e8628c, #c2185b); color: white; box-shadow: 0 4px 16px rgba(232,98,140,0.25); }
+.btn-secondary { background: white; color: #e8628c; border: 2px solid #f8bbd0; }
+.progress { height: 8px; background: #fce4ec; border-radius: 4px; overflow: hidden; margin: 12px 0; }
+.progress-bar { height: 100%; background: linear-gradient(90deg, #e8628c, #c2185b); border-radius: 4px; transition: width 0.3s; }
+.status { text-align: center; color: #b0728a; font-size: 13px; margin: 8px 0; }
+.pin-display { text-align: center; font-size: 36px; font-weight: 800; color: #c2185b; letter-spacing: 8px; padding: 16px; background: #fce4ec; border-radius: 14px; margin: 12px 0; }
+.tx-item { padding: 12px; border-radius: 12px; margin-bottom: 8px; display: flex; align-items: center; gap: 10px; border: 1px solid rgba(232,98,140,0.1); background: white; }
+.tx-emoji { font-size: 20px; width: 36px; height: 36px; display: flex; align-items: center; justify-content: center; background: #fce4ec; border-radius: 10px; flex-shrink: 0; }
+.tx-info { flex: 1; min-width: 0; }
+.tx-note { font-weight: 600; font-size: 13px; color: #4a2036; }
+.tx-meta { font-size: 11px; color: #b0728a; margin-top: 2px; }
+.tx-amount { font-weight: 800; font-size: 15px; color: #c2185b; flex-shrink: 0; }
+.tx-credit { color: #1565c0 !important; }
+.badge { display: inline-block; font-size: 9px; padding: 1px 6px; border-radius: 5px; font-weight: 700; margin-left: 4px; }
+.badge-cash { background: #fff8e1; color: #f57f17; }
+.badge-credit { background: #e3f2fd; color: #1565c0; }
+.badge-settled { background: #e8f5e9; color: #43a047; }
+.summary { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 12px 0; }
+.summary-item { text-align: center; padding: 12px; border-radius: 12px; background: #fce4ec; }
+.summary-label { font-size: 11px; color: #b0728a; }
+.summary-value { font-size: 18px; font-weight: 800; color: #c2185b; }
+.hidden { display: none; }
+.warn { background: #fff3e0; border-radius: 12px; padding: 12px 16px; font-size: 13px; color: #e65100; margin: 12px 0; text-align: center; }
+</style>
+</head>
+<body>
+
+<div class="card">
+  <div style="text-align:center; font-size:48px; margin-bottom:8px;">🔓</div>
+  <h1>กู้ข้อมูล Couple Expense</h1>
+  <p>หน้านี้จะค้นหา PIN ของคุณและถอดรหัสข้อมูลทั้งหมด<br>ข้อมูลไม่ถูกส่งไปไหน ทำงานในเครื่องคุณเท่านั้น</p>
+
+  <div id="step1">
+    <div id="dataStatus" class="status">กำลังตรวจสอบข้อมูล...</div>
+    <button id="btnRecover" class="btn btn-primary hidden" onclick="startRecovery()">🔍 ค้นหา PIN และกู้ข้อมูล</button>
+    <div id="noData" class="warn hidden">❌ ไม่พบข้อมูลในเบราว์เซอร์นี้ อาจถูกลบไปแล้ว</div>
+  </div>
+
+  <div id="step2" class="hidden">
+    <div class="status">🔍 กำลังค้นหา PIN... ใช้เวลาไม่เกิน 1 นาที</div>
+    <div class="progress"><div id="progressBar" class="progress-bar" style="width:0%"></div></div>
+    <div id="progressText" class="status">0 / 10,000</div>
+  </div>
+
+  <div id="step3" class="hidden">
+    <div style="text-align:center; font-size:48px; margin-bottom:8px;">🎉</div>
+    <h1>กู้ข้อมูลสำเร็จ!</h1>
+    <p>พบ PIN ของคุณแล้ว จดไว้แล้วกลับไปใช้แอปได้เลย</p>
+    <div style="font-size:12px; color:#b0728a; text-align:center; margin-bottom:4px;">PIN ของคุณคือ</div>
+    <div id="foundPin" class="pin-display">----</div>
+  </div>
+</div>
+
+<div id="dataSection" class="hidden">
+  <div class="card">
+    <h2>📊 สรุปยอดค้าง</h2>
+    <div class="summary">
+      <div class="summary-item">
+        <div class="summary-label">💵 เงินสด</div>
+        <div id="cashBalance" class="summary-value">฿0</div>
+      </div>
+      <div class="summary-item" style="background:#e3f2fd;">
+        <div class="summary-label" style="color:#5c6bc0;">💳 บัตรเครดิต</div>
+        <div id="creditBalance" class="summary-value" style="color:#1565c0;">฿0</div>
+      </div>
+    </div>
+    <div id="balanceSummary" class="status"></div>
+  </div>
+
+  <div class="card">
+    <h2>📋 รายการทั้งหมด (<span id="txCount">0</span>)</h2>
+    <div style="display:flex;gap:8px;margin-bottom:12px;">
+      <button class="btn btn-secondary" style="flex:1;padding:8px;font-size:12px;" onclick="filterTx('all')">ทั้งหมด</button>
+      <button class="btn btn-secondary" style="flex:1;padding:8px;font-size:12px;" onclick="filterTx('pending')">ค้างจ่าย</button>
+      <button class="btn btn-secondary" style="flex:1;padding:8px;font-size:12px;" onclick="filterTx('settled')">เคลียร์แล้ว</button>
+    </div>
+    <div id="txList"></div>
+  </div>
+</div>
+
+<script>
+// Same crypto as the app
+const Crypto = {
+  async hash(pin, salt) {
+    const h = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(pin + salt));
+    return [...new Uint8Array(h)].map(b => b.toString(16).padStart(2, "0")).join("");
+  },
+  async deriveKey(pin, salt) {
+    const e = new TextEncoder();
+    const km = await crypto.subtle.importKey("raw", e.encode(pin), "PBKDF2", false, ["deriveKey"]);
+    return crypto.subtle.deriveKey({ name: "PBKDF2", salt: e.encode(salt), iterations: 310000, hash: "SHA-256" }, km, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
+  },
+  async decrypt(obj, key) {
+    try {
+      return JSON.parse(new TextDecoder().decode(
+        await crypto.subtle.decrypt({ name: "AES-GCM", iv: new Uint8Array(obj.iv) }, key, new Uint8Array(obj.data))
+      ));
+    } catch { return null; }
+  }
+};
+
+let recoveredData = null;
+let allTx = [];
+
+// Check if data exists
+window.onload = () => {
+  const hash = localStorage.getItem("cet_pin_hash");
+  const salt = localStorage.getItem("cet_pin_salt");
+  const data = localStorage.getItem("cet_app_data");
+
+  if (hash && salt && data) {
+    document.getElementById("dataStatus").textContent = "✅ พบข้อมูลที่เข้ารหัส พร้อมกู้!";
+    document.getElementById("dataStatus").style.color = "#2e7d32";
+    document.getElementById("btnRecover").classList.remove("hidden");
+  } else {
+    document.getElementById("dataStatus").classList.add("hidden");
+    document.getElementById("noData").classList.remove("hidden");
+  }
+};
+
+async function startRecovery() {
+  document.getElementById("step1").classList.add("hidden");
+  document.getElementById("step2").classList.remove("hidden");
+
+  const salt = localStorage.getItem("cet_pin_salt");
+  const storedHash = localStorage.getItem("cet_pin_hash");
+  const encStr = localStorage.getItem("cet_app_data");
+  const encData = JSON.parse(encStr);
+
+  const bar = document.getElementById("progressBar");
+  const txt = document.getElementById("progressText");
+
+  for (let i = 0; i <= 9999; i++) {
+    const pin = String(i).padStart(4, "0");
+
+    try {
+      const ph = await Crypto.hash(pin, salt);
+      if (ph === storedHash) {
+        // Found PIN! Decrypt data
+        const key = await Crypto.deriveKey(pin, salt);
+        const dec = await Crypto.decrypt(encData, key);
+
+        if (dec) {
+          recoveredData = dec;
+          showRecovered(pin, dec);
+          return;
+        }
+      }
+    } catch (e) {}
+
+    // Update progress every 50 attempts
+    if (i % 50 === 0) {
+      const pct = ((i / 10000) * 100).toFixed(1);
+      bar.style.width = pct + "%";
+      txt.textContent = `${i.toLocaleString()} / 10,000 (${pct}%)`;
+      await new Promise(r => setTimeout(r, 0)); // yield to UI
+    }
+  }
+
+  // Not found
+  document.getElementById("step2").innerHTML = '<div class="warn">❌ ไม่สามารถถอดรหัสได้ ข้อมูลอาจเสียหาย</div>';
+}
+
+function showRecovered(pin, data) {
+  document.getElementById("step2").classList.add("hidden");
+  document.getElementById("step3").classList.remove("hidden");
+  document.getElementById("foundPin").textContent = pin;
+  document.getElementById("dataSection").classList.remove("hidden");
+
+  const txs = data.transactions || [];
+  const names = data.names || ["ฉัน", "แฟน"];
+  allTx = txs.map(t => ({ ...t, names }));
+
+  // Calculate balances
+  let cashBal = 0, creditBal = 0;
+  txs.filter(t => !t.settled).forEach(t => {
+    const amt = t.split ? t.amount / 2 : t.amount;
+    const isCash = (t.payMethod || "cash") === "cash";
+    if (t.payer === 0) { if (isCash) cashBal += amt; else creditBal += amt; }
+    else { if (isCash) cashBal -= amt; else creditBal -= amt; }
+  });
+
+  const fmt = n => n.toLocaleString("th-TH", { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+  document.getElementById("cashBalance").textContent = "฿" + fmt(Math.abs(cashBal));
+  document.getElementById("creditBalance").textContent = "฿" + fmt(Math.abs(creditBal));
+
+  const total = cashBal + creditBal;
+  const pending = txs.filter(t => !t.settled).length;
+  const settled = txs.filter(t => t.settled).length;
+  let sumText = `รวม ฿${fmt(Math.abs(total))} — `;
+  if (total > 0) sumText += `${names[1]} ติด ${names[0]}`;
+  else if (total < 0) sumText += `${names[0]} ติด ${names[1]}`;
+  else sumText += "เสมอกัน";
+  sumText += ` | ค้าง ${pending} รายการ, เคลียร์แล้ว ${settled} รายการ`;
+  document.getElementById("balanceSummary").textContent = sumText;
+
+  document.getElementById("txCount").textContent = txs.length;
+  filterTx("all");
+}
+
+const catMap = { food: "🍜", transport: "🚗", shopping: "🛍️", entertainment: "🎬", bills: "📄", other: "💫" };
+
+function filterTx(mode) {
+  let list = allTx;
+  if (mode === "pending") list = allTx.filter(t => !t.settled);
+  if (mode === "settled") list = allTx.filter(t => t.settled);
+
+  const fmt = n => n.toLocaleString("th-TH", { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+  const container = document.getElementById("txList");
+
+  if (list.length === 0) {
+    container.innerHTML = '<div class="status">ไม่มีรายการ</div>';
+    return;
+  }
+
+  container.innerHTML = list.map(t => {
+    const isCash = (t.payMethod || "cash") === "cash";
+    const emoji = catMap[t.category] || "💫";
+    const amount = t.split ? t.amount / 2 : t.amount;
+    const date = new Date(t.date).toLocaleDateString("th-TH", { day: "numeric", month: "short", year: "2-digit" });
+    const names = t.names || ["ฉัน", "แฟน"];
+
+    return `<div class="tx-item">
+      <div class="tx-emoji">${emoji}</div>
+      <div class="tx-info">
+        <div class="tx-note">${t.note}
+          <span class="badge ${isCash ? 'badge-cash' : 'badge-credit'}">${isCash ? '💵 สด' : '💳 บัตร'}</span>
+          ${t.settled ? '<span class="badge badge-settled">✓ เคลียร์</span>' : ''}
+          ${t.split ? '<span class="badge badge-cash">หารสอง</span>' : ''}
+        </div>
+        <div class="tx-meta">${names[t.payer]} จ่ายให้ • ${date}</div>
+      </div>
+      <div class="tx-amount ${isCash ? '' : 'tx-credit'}">฿${fmt(amount)}${t.split ? '<br><span style="font-size:9px;color:#cca0b3;">จาก ฿' + fmt(t.amount) + '</span>' : ''}</div>
+    </div>`;
+  }).join("");
+}
+</script>
+</body>
+</html>
